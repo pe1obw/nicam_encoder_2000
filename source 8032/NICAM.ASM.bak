@@ -1,0 +1,809 @@
+;============================================================================
+; PE1OBW/PE1PCF NICAM software
+; 
+; Date 	970607 JWD initial version for prototype
+;     	980131 JWD serial upload to DSP added
+;      	980208 JWD New version for 9801 board
+;       980704 JWD experiment AD communications
+;	980715 JWD pullups on extra defined pins
+;	981010 JWD menu added, set_ functions added and much more..
+;	990605 JWD autodetect for display added
+;	000102 JWD 1khz beep added, version nr increased
+;	011110 JWD scrambling
+;============================================================================
+
+#include "8032_reg.h"
+
+;#define         TWOROW_DISPLAY          1
+
+;=============== SYSTEM DEFINES =============================================
+
+STSWORD         .EQU    00001000b   	;dsp init - reset and download
+INTWORD         .EQU    01000000b   	;dsp init - B0,1 program, no ints enabled
+
+BAUD4K8         .EQU    256-12          ;4800 bd with 11.0592 MHz XTAL
+BAUD9K6    	.EQU	256-6      	;9600 bd with 11.0592 MHz XTAL
+BAUD19K2	.EQU	256-3		;19K2 with 11.0592 MHz XTAL
+BAUD57K6	.EQU	256-1		;57K6 with 11.0592 MHz XTAL
+
+;=============== HARDWARE PINS ==============================================
+
+;---- 8032 pins ------------
+LCA_nRES        .EQU    P1.0		; LCA reset pin (active low)
+LCA_DONE        .EQU    P1.1		; LCA done/prog pin (done=1,prog=0)
+DSP_nRES        .EQU    P1.2		; DSP reset pin (active low)
+TX_SEL          .EQU    P1.3		; TX output select 0=RS232, 1=DSP
+nKEY3		.EQU	P1.4		; Front panel keys
+nKEY2		.EQU	P1.5
+nKEY1		.EQU	P1.6
+LED		.EQU	P1.7		; Front panel LED
+SER_IN		.EQU	P3.0		; RXD
+SER_OUT         .EQU    P3.1            ; TXD, to RS232 or to DSP
+DSP_STAT	.EQU	P3.2		; DSP XF output
+LCA_IRQ		.EQU	P3.3		; LCA interrupt
+
+#define	SDA		P3.4		; I2C bus
+#define	SCL		P3.5
+
+
+;---- LCA registers -----
+#define	LCA_CONF	0000h		; Bit 0 = configuration data
+#define LCA_CBITS       0001h           ; Bit 0..3 = C1..C4
+#define LCA_ADBITS0     0002h           ; Bit 0..3 = AD0..AD3
+#define LCA_ADBITS1     0003h           ; Bit 0..3 = AD4..AD7
+#define LCA_ADBITS2     0004h           ; Bit 0..2 = AD8..AD10, write clears tx_int_flag
+#define LCA_CONF1       0000h           ; Bit 1,0
+                                        ;     0 1 = analog input selected
+                                        ;     1 0 = digital input enable
+                                        ; Bit 3,2
+					;     0 0  5.85 MHz selected
+					;     0 1  6.552 MHz selected
+					;     1 0  1.4 MHz selected
+#define LCA_SCR0        0005h           ; Bit 0..3 = scrambler init word 0..3
+#define LCA_SCR1        0006h           ; Bit 0..3 = scrambler init word 4..7
+#define LCA_SCR2        0007h           ; Bit 0 = scrambler init word 8
+
+#define	LCA_IN0		0000h		; Bit 0..3 AD0..3
+#define	LCA_IN1		0001h		; Bit 0..3 AD4..7
+#define	LCA_IN2		0002h		; Bit 0..3 AD8..10, rx_interrupt_flag
+#define	LCA_IN3		0003h		; Bit 0    tx_interrupt_flag
+
+#define	IN_ANALOG	01h		; CONF1 register bit patterns
+#define	IN_SPDIF	02h
+#define	OUT_5850	00h
+#define	OUT_6552	04h
+#define	OUT_1462	08h
+
+;=============== internal RAM =================================================
+
+TX_ENA		.EQU	000h		; bit flag to indicate TX active
+TO_FLAG		.EQU	001h		; timeout flag
+TO_FLAG2	.EQU	002h		; timeout flag2
+
+; Block 060-07F is for FIFO buffers !!
+SO_WP		.EQU	05FH
+SO_RP		.EQU	05EH
+SI_WP		.EQU	05DH
+SI_RP		.EQU	05CH		; serial
+
+CSL		.EQU	05BH
+CSH		.EQU	05AH
+STOREL		.EQU	059H
+STOREH		.EQU	058H
+AD_LO           .EQU    057H
+AD_HI           .EQU    056H
+ADCNTLO		.EQU	052H
+ADCNTHI		.EQU	051H
+
+;----- Settings, also stored in EEPROM (in this order) -----
+#DEFINE		NR_EEP_ITEMS	9	; nr of memory locations from 8 to store...
+OUTPUT		.EQU	008H
+INPUT		.EQU	009H
+INPUT_LVL	.EQU	00AH
+PREEMP		.EQU	00BH
+C4BIT		.EQU	00CH
+NICMODE		.EQU	00DH
+NICTEST		.EQU	00EH
+SCRAMBLE        .EQU    00FH
+LAST_NR		.EQU	010H		; last used menu item number
+
+
+TO_CNTLO	.EQU	01CH
+TO_CNTHI	.EQU	01DH
+SLOW_TIM	.EQU	01EH		; timeout counter
+MENU_NR		.EQU	01FH		; menu item number (0=none)
+
+		.ORG    0000h
+		LJMP    START
+
+		.ORG    0003H
+                RETI                    ;int 0 (DSP interrupt)
+
+		.ORG    000BH
+                LJMP	TIM_IRQ         ;timer 0 (timer 0)
+
+		.ORG    0013H
+                LJMP    LCAINT		;int 1 (lca interrupt)
+
+		.ORG    001BH
+		RETI                    ;timer 1
+
+		.ORG    0023H
+		LJMP	SER_INT         ;serial
+
+		.ORG    002BH
+		RETI                    ;timer 2
+
+
+;==================================================================
+; Start of program.
+;
+; Initialize hardware first.
+;=================================================================
+START:        
+		CLR	LED
+		MOV     PSW, #0
+		MOV     SP, #021h		; behind bit space
+		LCALL   LCA_INIT 	      	; FIRST OF ALL initialize FPGA ! Do not perform
+						; any display operation before LCA is initialized!
+		LCALL	DISPINIT		; initialize LCD
+		MOV	DPTR, #boot_txt
+		CLR	A
+		LCALL	MTXT			; show boot-text
+		MOV	MENU_NR, #0		; 
+		MOV	LAST_NR, #1
+                LCALL   CONFIGURE      		; Configure LCA registers
+
+		MOV	TO_CNTHI, #0
+		MOV	SLOW_TIM, #0
+		CLR	TO_FLAG2
+		CLR	TO_FLAG			; clear timeout counters and flags
+		LCALL	SET_TIMER		; start timer
+
+		MOV	R0, #0
+		LCALL	SHOW_MENU		; show initial text
+		CLR	TX_SEL			; select RS232 output
+		LCALL	INITSERIAL		; initialize com port
+
+		LCALL	COM_INIT
+                MOV     AD_LO, #0
+		CLR	LED
+
+		;check for display presence
+		LCALL	DISPCHECK
+		JC	loop			; if display found (c=1) jump
+
+;==================================================================
+; Main program loop if display/keys are not connected
+;=================================================================
+
+loop2:   	;check switch 1 (5.85/6.552)
+		MOV	A, OUTPUT
+		JB	nKEY1, op585		; check pin. If high, set to 585.
+		CJNE	A, #1, do6552		; check if already on 6.552. if not, set so
+		SJMP	chkinp
+op585:		CJNE	A, #0, do585		; check if already on 5.85. if not, set so
+
+chkinp:		MOV	A, INPUT
+		JB	nKEY2, opan		; check pin. If high, set analog
+		CJNE	A, #1, dodig
+		SJMP	loop2
+opan:		CJNE	A, #0, doan
+		SJMP	loop2
+
+do6552:		MOV	OUTPUT, #1		; set output to 6.552
+		LCALL	SET_IN_OUTPUT		; set new output
+		SJMP	loop2
+do585:		MOV	OUTPUT, #0		; set output to 5.85
+		LCALL	SET_IN_OUTPUT		; set new output
+		SJMP	loop2
+dodig:		MOV	INPUT, #1		; set input digital
+		LCALL	SET_IN_OUTPUT		; set new input
+		SJMP	loop2
+doan:		MOV	INPUT, #0		; set input analog
+		LCALL	SET_IN_OUTPUT		; set new input
+		SJMP	loop2
+
+
+;==================================================================
+; Main program loop if display/keys are connected
+;=================================================================
+
+loop:   	LCALL	KEY_TASK		; handle key-presses
+		SJMP	loop
+
+
+
+
+;------------------------------------------------------------------
+; SET_IN_OUTPUT
+; 
+; Set Nicam input/output mode. 
+; INPUT = 0 or 1 for analog or digital.
+; OUTPUT = 0,1 or 2 for 5.85, 6.552 or 1.44 MHz.
+;------------------------------------------------------------------
+
+SET_IN_OUTPUT:
+		ANL	OUTPUT, #3
+		ANL	INPUT, #1
+	       	MOV	A, OUTPUT
+		RL	A
+		RL	A
+		ADD	A, #1
+		ADD	A, INPUT		; calculate new config nibble
+	        MOV     DPTR, #LCA_CONF1        ; write to configuration register
+		MOVX	@DPTR, A
+		RET
+
+
+;------------------------------------------------------------------
+; SET_SCRAMBLE:
+;
+; If scramble = 0, the scramble init word is set to 1ff (normal).
+; If scramble = 1, the scramble init word is set to 000 (off).
+; If scramble = 2, the scramble init word is set to 1b3 (secret).
+; LCA registers...
+;------------------------------------------------------------------
+
+SET_SCRAMBLE:		
+                MOV     A, SCRAMBLE
+                JNZ     scramble
+
+noscramble:     MOV     A, #0FFh
+                MOV     DPTR, #LCA_SCR0
+                MOVX    @DPTR, A
+                MOV     DPTR, #LCA_SCR1
+                MOVX    @DPTR, A
+                MOV     DPTR, #LCA_SCR2
+                MOVX    @DPTR, A		; init word = 1FF
+                RET
+
+scramble:       CJNE	A, #1, scramble2
+		MOV     A, #00h
+                MOV     DPTR, #LCA_SCR0
+                MOVX    @DPTR, A
+                MOV     A, #00h
+                MOV     DPTR, #LCA_SCR1
+                MOVX    @DPTR, A
+                MOV     A, #00h
+                MOV     DPTR, #LCA_SCR2         ; init word = 000h (off)
+                MOVX    @DPTR, A
+                RET
+
+scramble2:	MOV     A, #0bh
+                MOV     DPTR, #LCA_SCR0
+                MOVX    @DPTR, A
+                MOV     A, #09h
+                MOV     DPTR, #LCA_SCR1
+                MOVX    @DPTR, A
+                MOV     A, #01h
+                MOV     DPTR, #LCA_SCR2         ; init word = 19bh (dec=1b3)
+                MOVX    @DPTR, A
+                RET
+
+
+;------------------------------------------------------------------
+; SET_CBITS
+;
+; NICMODE can be 0-2 for stereo, dual mono and mono
+; C4BIT can be 0 or 1 for off or on
+;------------------------------------------------------------------
+
+SET_CBITS:      ANL	C4BIT, #1
+		ANL	NICMODE, #3
+	        MOV     A, C4BIT
+		SWAP	A
+		RR	A
+		ADD	A, NICMODE
+	        MOV     DPTR, #LCA_CBITS
+	        MOVX    @DPTR, A
+		RET
+
+;------------------------------------------------------------------
+; SET_DSP
+;
+; Configure the DSP with the config file depending on 
+; INPUT_LVL (0-3), PREEMP (0/1) and NICMODE (0)
+;------------------------------------------------------------------
+
+SET_DSP:	ANL	INPUT_LVL, #3
+		ANL	PREEMP, #1
+		ANL	NICMODE, #3
+
+		MOV	A, NICTEST
+		JZ	not_test
+		;--- test function ---
+		CJNE	A,#1,not_left
+		;beep on left channel
+		MOV	DPTR, #(BEEPLEFTEND - BEEPLEFT - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(BEEPLEFTEND - BEEPLEFT)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #BEEPLEFT
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+not_left:	CJNE	A,#2,not_right
+		;beep on right channel
+		MOV	DPTR, #(BEEPRGHTEND - BEEPRGHT - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(BEEPRGHTEND - BEEPRGHT)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #BEEPRGHT
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+not_right:	;---- beep on both channels
+		MOV	DPTR, #(BEEPBOTHEND - BEEPBOTH - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(BEEPBOTHEND - BEEPBOTH)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #BEEPBOTH
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+not_test:
+		MOV	A, PREEMP
+		JNZ	not_nopr
+		;--- no preemphasis ---
+		MOV	DPTR, #(DSP_NOPREND - DSP_NOPR - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(DSP_NOPREND - DSP_NOPR)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #DSP_NOPR
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+not_nopr:	MOV	A, INPUT_LVL
+		CJNE	A, #3, not12db
+		;--- SET DSP for +12 dB gain
+		MOV	DPTR, #(DSP_12DBEND - DSP_12DB - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(DSP_12DBEND - DSP_12DB)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #DSP_12DB
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+not12db:	CJNE	A, #2, not6db
+		;--- SET DSP for +6 dB gain
+		MOV	DPTR, #(DSP_6DBEND - DSP_6DB - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(DSP_6DBEND - DSP_6DB)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #DSP_6DB
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+not6db:		CJNE	A, #1, not0db
+		;--- SET DSP for 0 dB gain
+		MOV	DPTR, #(DSP_0DBEND - DSP_0DB - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(DSP_0DBEND - DSP_0DB)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #DSP_0DB
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+not0db:		;--- SET DSP for -6 dB gain
+		MOV	DPTR, #(DSP_M6DBEND - DSP_M6DB - 2)/2
+		MOV	R2, DPL
+		MOV	R3, DPH
+		MOV	DPTR, #(DSP_M6DBEND - DSP_M6DB)/2
+		MOV	R4, DPL
+		MOV	R5, DPH
+		MOV	DPTR, #DSP_M6DB
+		MOV	R6, DPL
+		MOV	R7, DPH
+		LCALL	DSP_INIT		
+		RET
+
+
+
+;--------------------------------------------------------------------
+; CONFIGURE
+;       Configure Nicam coder by reading values from EEPROM.
+;	If eeprom data is not available, set defaults to
+;       analog in, AD/C bits to 0, no scrambling
+;--------------------------------------------------------------------
+
+CONFIGURE:
+		MOV	B, #0
+		LCALL	READEEPROM
+		LCALL	READEEPROM
+		CJNE	A, #124, set_defaults		; Check if signature is present
+		MOV	R7, #NR_EEP_ITEMS
+		MOV	R0, #8
+eerd_loop:	INC	B				; Copy location 1-8 from EEPROM to
+		LCALL	READEEPROM			; location 8-15 in internal RAM
+		MOV	@R0, A
+		INC	R0
+		DJNZ	R7, eerd_loop
+		SJMP	set_hw
+set_defaults:
+		MOV	INPUT, #0
+		MOV	OUTPUT, #1
+                MOV     SCRAMBLE, #0
+		MOV	INPUT_LVL, #1
+		MOV	PREEMP, #1
+		MOV	C4BIT, #0
+		MOV	NICMODE, #0
+		MOV	NICTEST, #0
+set_hw:
+		LCALL	SET_DSP
+		LCALL	SET_IN_OUTPUT
+		LCALL	SET_SCRAMBLE
+		LCALL	SET_CBITS
+
+		; Set additional data
+		MOV	A, #0
+	        MOV     DPTR, #LCA_ADBITS0
+	        MOVX    @DPTR, A
+	        MOV     DPTR, #LCA_ADBITS1
+	        MOVX    @DPTR, A
+	        MOV     DPTR, #LCA_ADBITS2
+	        MOVX    @DPTR, A
+	        RET
+
+
+;------------------------------------------------------------------
+; WRITE_SETTINGS
+;
+; Store settings in EEPROM
+;------------------------------------------------------------------
+
+WRITE_SETTINGS:
+		MOV	B, #0
+		MOV	A, #124
+		LCALL	WREEPROM			; write signature
+		MOV	R7, #NR_EEP_ITEMS
+		MOV	R0, #8
+eewr_loop:	INC	B				; Copy location 8-15 from IRAM to
+		MOV	A, @R0
+		LCALL	WREEPROM			; location 8-15 in EEPROM
+		INC	R0
+		DJNZ	R7, eewr_loop
+		RET
+
+
+;--------------------------------------------------------------------
+; SET_TIMER
+;
+; intialize timer 0 to generate interrupts each 65 ms.
+;--------------------------------------------------------------------
+
+SET_TIMER:	CLR	TR0				; stop timer 0
+		ANL	TMOD, #11110000b		; change to 16-bit timer (timer0 mode1)
+		ORL	TMOD, #00000001b
+		SETB	TR0				; timer run bit timer0
+		SETB	ET0          			; enable timer0 int
+		RET
+
+
+;------------------------------------------------------------------
+; LCA_INIT
+;
+; Initialize LCA, upload configuration (LCA1.ASM) to it
+;------------------------------------------------------------------
+
+LCA_INIT:
+		MOV	P2,#0			;to select block 00xxH
+		SETB    LCA_DONE
+		CLR     IEC.7                   ;disable all interrupts
+
+		CLR     LCA_nRES                ;reset LCA, the done/prg line is pulled low too
+		JB      LCA_DONE, lca_err1      ;should be low too
+		MOV     DPTR, #10
+		LCALL   DELAY                   ;reset low for 10 ms
+		SETB    LCA_nRES                ;release reset line
+		MOV     DPTR, #2
+		LCALL   DELAY                   ;wait 2 ms
+		MOV     DPTR, #LCA1_END
+		MOV     R0, DPL
+		MOV     R1, DPH                 ;temporarily store end address of LCA data
+		MOV     DPTR, #LCA1             ;dptr points to the start of LCADATA
+
+lcaim2: 	MOV     A, #0
+		MOVC    A, @A+DPTR              ;load data byte in accumulator
+		MOV     R7, #8                  ;reset bit counter
+
+lcaim1: 	RL      A                      	;shift data byte, MSB first
+		MOVX	@R0, A			;clock out bit 0 to address 00xx.
+		DJNZ    R7, lcaim1              ;next bit
+
+		INC     DPTR
+		MOV     A, R1
+		CJNE    A, DPH, lcaim2
+		MOV     A, R0
+		CJNE    A, DPL, lcaim2         ;if not the last byte take next
+
+		;check done pin
+		JB      LCA_DONE,lca_err2
+		RET
+
+lca_err1:
+lca_err2:
+		;### TODO: place error handling here
+		RET
+
+
+
+
+;------------------------------------------------------------------
+; DSP_INIT
+;
+; Provides serial download of DSP instructions via the RS232 port
+; On error, carry is set and datapointer points to error message
+;
+; in R2/R3 is placed #(DSP1END - DSP1 - 2)/2
+; in R4/R5 is placed #(DSP1END - DSP1)/2
+; in R6/R7 is placed #DSP1
+;------------------------------------------------------------------
+
+DSP_INIT:	;--- disable all interrupts ---
+		CLR	EA
+
+		;--- connect TX to DSP ---
+		SETB	TX_SEL
+		SETB	SER_OUT
+
+		;--- initialize serial port for 4K8, 2 stopbits ---
+		MOV     PCON,#080H
+		ANL	TMOD, #00001111b	; change t1mode to baudrate generator
+		ORL	TMOD, #00100000b
+		MOV     SCON, #11011010b	; mode 3 , Enable receiver
+		MOV     TL1,#BAUD9K6
+    		MOV     TH1,#BAUD9K6
+    		SETB    TCON.6          	; start counter
+
+		;--- give reset pulse ---
+		SETB    SER_OUT         	; set BIO pin high to indicate serial transfer
+		CLR     DSP_nRES
+		MOV     DPTR,#10
+		LCALL   DELAY
+		SETB    DSP_nRES     	  	; give 10 ms reset pulse
+		MOV     DPTR,#10
+		LCALL   DELAY           	;
+		CLR     DSP_nRES
+		MOV     DPTR,#10
+		LCALL   DELAY
+		SETB    DSP_nRES     	  	; give 10 ms reset pulse
+		MOV     DPTR,#10
+		LCALL   DELAY           	; 10 ms delay after reset
+
+		;--- check XF state ---
+		JB	DSP_STAT, dsi1		; should be high now!
+		MOV	DPTR, #dsperr1
+		SETB	C
+		SETB	EA			; enable interrupts
+		RET
+
+dsi1:         	;--- send baud rate detect byte ---
+		MOV     A,#0FFh
+		LCALL   DSP_PUTCH
+
+		;--- send status and program length minus two (!!!) ---
+;	MOV	DPTR, #(DSP1END - DSP1 - 2)/2
+		MOV	DPL, R2
+		MOV	DPH, R3
+		MOV     A,#STSWORD
+		ORL     A,DPH		       	; add bit 0..2 (MSB's of program length)
+		LCALL   DSP_PUTCH
+		MOV     A,#INTWORD       	; send interrupt word
+		LCALL   DSP_PUTCH
+		MOV     A,DPL		       	; load bit 0..7 of program length
+		LCALL   DSP_PUTCH
+
+		;---- Transmit program ----
+;	MOV	DPTR, #(DSP1END - DSP1)/2
+		MOV	DPL, R4
+		MOV	DPH, R5	
+		MOV	R0,DPL
+		MOV	R1,DPH			; store length in R0,R1
+		MOV	CSL, #0
+		MOV	CSH, #0			; checksum = 0
+;	MOV     DPTR,#DSP1		; start of data
+		MOV	DPL, R6
+		MOV	DPH, R7
+
+dsploop:	MOV	A, R0			; while( length-- )
+		DEC	R0
+		JNZ	dspsend
+		MOV	A, R1
+		DEC	R1
+		JNZ	dspsend
+		SJMP	dspcs
+
+dspsend:	MOV     A,#1			; data is stored high byte first!
+		MOVC    A,@A+DPTR
+		MOV	STOREL, A		; store temporarily
+		LCALL   DSP_PUTCH           	; transmit low byte
+		MOV     A,#0
+		MOVC    A,@A+DPTR
+		MOV	STOREH, A		; store high byte
+		LCALL   DSP_PUTCH           	; transmit high byte
+		MOV	A, CSL
+		ADD	A, STOREL
+		MOV	CSL, A
+		MOV	A, CSH
+		ADDC	A, STOREH
+		MOV	CSH, A			; add word to checksum
+		INC     DPTR
+		INC     DPTR			; next word
+		SJMP	dsploop
+
+dspcs:		;--- send checksum ---
+		MOV     A,CSL
+		LCALL   DSP_PUTCH
+		MOV     A,CSH
+		LCALL   DSP_PUTCH           	; send checksum
+
+		;--- test XF flag ---
+		MOV	DPTR, #2
+		LCALL	DELAY			; some delay
+		;JB	DSP_STAT, dspstart	; should be high now
+		;MOV	DPTR, #dsperr2
+		;SETB	C
+		;SETB	EA			; enable interrupts
+		;RET
+
+dspstart:	;------- send synchronisation word ----
+		MOV     A,#0FFh
+		LCALL   DSP_PUTCH           	; program starts now (if no errors...)
+		CLR	C
+		SETB	EA			; enable interrupts
+		RET
+
+; XMIT a byte over the serial port
+DSP_PUTCH:	JNB     SCON.1,DSP_PUTCH	;wait until buffer is empty
+		CLR     SCON.1
+		MOV     SBUF,A
+		RET
+
+
+
+;-------------------------------------------------------
+COM_INIT:
+;	
+;-------------------------------------------------------
+
+		CLR	IT1			; external int 1 on low level
+		SETB	EX1			; enable external int 1
+		SETB	EA			; global enable
+		RET
+
+
+
+
+;-------------------------------------------------------
+COM_TASK:
+;
+;-------------------------------------------------------
+	
+		RET			
+
+;-------------------------------------------------------
+LCAINT:	
+;	ISR for LCA xmit
+;
+;	Simple protocol: AD0..7 : data
+;			 AD8..9 : 00 = no data
+;				  11 = data valid
+;			 AD10   : parity
+;-------------------------------------------------------
+
+		PUSH	PSW
+		PUSH	B
+		PUSH	ACC
+		PUSH	DPL
+		PUSH	DPH
+
+		LCALL	KBHIT			; check if something to xmit
+		MOV	B, #0			; 0 = no data to xmit
+		MOV	A, #0			; set to 0 for no data
+		JNC	no_tdata
+		LCALL	GETCH
+		MOV	C, PSW.0		; get parity bit
+		MOV	B, #1			; 3 = data available
+		MOV	B.2, C			; store in bit 2 of B register
+
+no_tdata:	MOV     DPTR, #LCA_ADBITS0
+	        MOVX    @DPTR, A		; write low nibble (AD0..3)
+		MOV     DPTR, #LCA_ADBITS1
+		SWAP	A
+	        MOVX    @DPTR, A		; write mid nibble (AD4..7)
+		MOV     DPTR, #LCA_ADBITS2
+		MOV	A, B
+	        MOVX    @DPTR, A		; write high nibble (AD8..10) and clear int
+
+		POP	DPH
+		POP	DPL
+		POP	ACC
+		POP	B
+		POP	PSW
+		RETI
+		
+
+
+;--------------------------------------------------------------------------------
+; TIM_IRQ
+;
+; Timer 0 interrupt service routine. Is called each 65535 us. If slow_tim
+; times out, TO_FLAG is set.
+;--------------------------------------------------------------------------------
+
+TIM_IRQ:	push 	ACC
+		push 	PSW
+
+		mov	A,TO_CNTHI
+		jz	tim_irq1
+		djnz	TO_CNTLO, tim_irq1
+		djnz	TO_CNTHI, tim_irq1
+		setb	TO_FLAG2
+
+tim_irq1:	mov	A, SLOW_TIM
+		jz	tim_irq_end
+		djnz	SLOW_TIM, tim_irq_end		; decrement the timeout timer
+		setb	TO_FLAG				; if 0, set flag
+tim_irq_end:	pop	PSW				; restore
+		pop	ACC
+		reti
+
+
+dsperr1:	.db	"error 1:DSP XF  \000"			; XF flag not detected
+dsperr2:	.db	"error 2:DSP CS  \000"			; Checksum error
+boot_txt:	.db	"Initializing... \000"			; startup text
+
+#include "serial4.asm"			; serial routines
+#include "diversen.h"                   ; 'delay' is used...
+#include "display2.h"			; LCD routines
+#include "menu.asm"
+#include "iic.h"
+#include "eeprom.h"
+
+;---- LCA config data ----
+#include "lca1.asm"       
+
+;---- DSP config data ----  
+#include "dsp_m6db.asm"
+#include "dsp_0db.asm"
+#include "dsp_6db.asm"
+#include "dsp_12db.asm"
+#include "dsp_nopr.asm"
+#include "beepboth.asm"
+#include "beepleft.asm"
+#include "beeprght.asm"
+
+		.END
+
+
+;--------------------- end of file ------------------------------
+
