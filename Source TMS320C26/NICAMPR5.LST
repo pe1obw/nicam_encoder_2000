@@ -1,0 +1,945 @@
+0001   0000             ;-----------------------------------------------------------;
+0002   0000             ; NICAMPR5.ASM 
+0003   0000             ; 
+0004   0000             ; Nicam signal conditioning for TMS320C26 DSP kit
+0005   0000             ;
+0006   0000             ; Date : 970528 JWD initial version
+0007   0000             ;        970731 JWD 1.00 tested, seems OK now!
+0008   0000             ;        970903 JWD Test, preemphasis included.
+0009   0000             ;        971112 JWD Clipping after preemphasis added
+0010   0000             ;        980110 JWD Adapted from nicampr2.asm, added:clip indication
+0011   0000             ;	 980201 JWD Converted to TASM assembler
+0012   0000             ;	 980222 JWD Peak indicator driver added, J17 modified (+/- 0,05dB!)
+0013   0000             ;	 980627 JWD Peak indicator bits changed.
+0014   0000             ;-----------------------------------------------------------;
+0015   0000             
+0016   0000             
+0017   0000             
+0018   0000             ; TASM specific
+0019   0000             	.msfirst
+0020   0000             
+0021   0000             #define	set		EQU
+0022   0000             #define	ps		ORG
+0023   0000             #define	entry		msfirst
+0024   0000             #define	conf(var)	.word 0CE3Ch|var
+0025   0000             
+0026   0000             
+0027   0000             
+0028   0000             
+0029   0000             ;Variables (in B2, 60-7F)
+0030   0000             TEMPX           .set    060h    ; STATUS storage
+0031   0000             STAT1           .set    061h    ; STATUS storage
+0032   0000             ACCU_lo         .set    062h    ;
+0033   0000             ACCU_hi         .set    063h    ;
+0034   0000             FLAG1           .set    064h    ; semaphore
+0035   0000             LMAX            .set    065h
+0036   0000             RMAX            .set    066h
+0037   0000             SIP             .set    067h
+0038   0000             WHATBUF         .set    068h    ; 0=INBUF1 filled by interrupt, 1=INBUF2
+0039   0000             OCNT            .set    069h	; output word counter, used by XINT and INT0 isr
+0040   0000             INBUF           .set    06Ah    ; contains a pointer to the last read inbuf
+0041   0000             AR6STORE        .set    06Bh
+0042   0000             AR7STORE        .set    06Ch
+0043   0000             CONST127        .set    06Dh    ; constant value (is faster as immediate)
+0044   0000             FCOEF1          .set    06Eh    ; filter coefficient
+0045   0000             FCOEF2          .set    06Fh
+0046   0000             FCOEF3          .set    070h
+0047   0000             Y_PREVL         .set    071h
+0048   0000             Y_PREVR         .set    072h
+0049   0000             X_PREVL         .set    073h
+0050   0000             X_PREVR         .set    074h
+0051   0000             CLIPVAL         .set    075h
+0052   0000             LPEAK		.set	076h	; peak levels. 4400=clip, 3C00=range 7, 2C00=range 5
+0053   0000             RPEAK		.set	077h
+0054   0000             TMP		.set	078h	; temporarily storage, used by peak indicator
+0055   0000             LVUREG		.set	079h
+0056   0000             RVUREG		.set	07Ah	; temporarily storage of vu pattern
+0057   0000             
+0058   0000             
+0059   0000             ;Buffer start points
+0060   0000             OUTBUF          .set    0600h   ; (44 bytes)
+0061   0000             INBUF1-2        .set    067Eh   ; (1 byte)
+0062   0000             INBUF1-1        .set    067Fh   ; (1 byte)
+0063   0000             INBUF1          .set    0680h   ; (64 bytes)
+0064   0000             INBUF2          .set    06C0h   ; (64 bytes)
+0065   0000             SABUF           .set    0740h   ; (64 bytes)
+0066   0000             SABUF+1         .set    0741h   ; ptr
+0067   0000             MAXBUF          .set    07C0h   ; (64 bytes)
+0068   0000             MAXBUF+1        .set    07C1h   ; assembler can't calculate
+0069   0000             
+0070   0000             ;  register usage:
+0071   0000             ;  AR0..5 are for common use by the main program
+0072   0000             ;  AR6 is output buffer pointer
+0073   0000             ;  AR7 is input buffer pointer
+0074   0000             
+0075   0000             ;----------------------------------------------------------------
+0076   0000             ;    SECONDARY VECTOR TABLE LOACTED IN B0 PROGRAM RAM
+0077   0000             ;----------------------------------------------------------------
+0078   0000             
+0079   0000             	.include  "mmregs.asm"  ;     > USERCODE SHOULD NOT OVERWRITE DSKD  <
+0001+  0000             ;-----------------------------------------------------------;
+0002+  0000             ; MMREGS.ASM                                                ;
+0003+  0000             ; (C) 1992-93                                               ;
+0004+  0000             ; Texas Instruments Inc.                                    ;
+0005+  0000             ; By: Keith Larson                                          ;
+0006+  0000             ;     TMS320Cxx DSP Applications                            ;
+0007+  0000             ;                                                           ;
+0008+  0000             ; Contains a list of commonly used values                   ;
+0009+  0000             ;-----------------------------------------------------------;
+0010+  0000             DRR     .equ    0
+0011+  0000             DXR     .equ    1
+0012+  0000             TIM     .equ    2
+0013+  0000             PRD     .equ    3
+0014+  0000             IMR     .equ    4
+0015+  0000             GREG    .equ    5
+0016+  0000             B2_D    .equ    060h
+0017+  0000             B0_D    .equ    0200h
+0018+  0000             B1_D    .equ    0400h
+0019+  0000             B3_D    .equ    0600h
+0020+  0000             B0_P    .equ    0FA00h
+0021+  0000             B1_P    .equ    0FC00h
+0022+  0000             B3_P    .equ    0FE00h
+0023+  0000             
+0024+  0000             AR0     .equ    0
+0025+  0000             AR1     .equ    1
+0026+  0000             AR2     .equ    2
+0027+  0000             AR3     .equ    3
+0028+  0000             AR4     .equ    4
+0029+  0000             AR5     .equ    5
+0030+  0000             AR6     .equ    6
+0031+  0000             AR7     .equ    7
+0032+  0000             
+0033+  0000             ;  use a comment to end .include files ending with .equ
+0034+  0000             ;  to avoid an ERROR.  Also, comment must start in column 2
+0080   FA00             	.ps     0fa00h          ;     > VECTORS.  ON LOAD, INT2 IS RESTORED <
+0081   FA00 FF 80 FB 00 	B       start           ;RS   > BY DSKD, BUT TRAP IS NOT            <
+0082   FA02 FF 80 FC 84 	B       INT0            ;INT0
+0083   FA04 FF 80 FB 00 	B       start           ;INT1
+0084   FA06 FF 80 FB 00 	B       start           ;INT2  > DSKD LOAD IGNORES INT2 VECTOR
+0085   FA08 FF 80 FB 00 	B       start           ;TINT
+0086   FA0A FF 80 FC 9D 	B       RINT            ;RINT  Branch to receive interrupt routine
+0087   FA0C FF 80 FC 8C 	B       XINT            ;XINT  Branch to transmit interrupt routine
+0088   FA0E                
+0089   FA0E             
+0090   FA0E             ;----------------------------------------------------------------
+0091   FA0E             ;    APPLICATION CODE IS LOCATED ABOVE DSKD KERNAL
+0092   FA0E             ;----------------------------------------------------------------
+0093   FA0E             	
+0094   FB00             	.ps     0FB00h          ;
+0095   FB00             	.entry                  ;
+0096   FB00             		
+0097   FB00             ;-------------------------------------------------------------------
+0098   FB00             ; Initialisation
+0099   FB00             ;
+0100   FB00             ;-------------------------------------------------------------------
+0101   FB00             
+0102   FB00 C8 00       start:  ldpk    0               ; All direct addressing is to 00 to 7F (B3)
+0103   FB01 CE 0E       	fort    0               ; Serial port : 16 bit
+0104   FB02 CE 20       	rtxm                    ;             : ext. FSX
+0105   FB03 CE 37       	sfsm                    ;             ; burst mode
+0106   FB04 CA 80       	lack    080h            ; not needed ?
+0107   FB05 60 05       	sacl    GREG            ; not needed ?
+0108   FB06 CE 3E       	conf(2)	                ; B3=DATA 0600-07ff, B0,1=program A000-DFFF
+0109   FB07 CE 03       	sovm                    ; catch accu overflows (needed for abs funct.)
+0110   FB08 CE 07       	ssxm                    ; sign extended mode!
+0111   FB09 CE 08       	spm     0               ; set P register shift mode to 0 (no shift)
+0112   FB0A             
+0113   FB0A             	;This section is only for diagnostics
+0114   FB0A D0 01 00 00 	lalk    0000h
+0115   FB0C 55 88       	larp    AR0
+0116   FB0D D0 00 06 00 	lrlk    AR0,600h
+0117   FB0F CB FF       	rptk    255
+0118   FB10 60 A0       	sacl    *+
+0119   FB11 CB FF       	rptk    255
+0120   FB12 60 A0       	sacl    *+              ; clear RAM
+0121   FB13             
+0122   FB13 D0 01 40 02 	lalk    04002h		; 8000 - 1000 / 8000 - 2000 / 8000 - 4000
+0123   FB15 60 75       	sacl    CLIPVAL         ; used for clipping after preemphasis
+0124   FB16 CA 7F       	lack    127
+0125   FB17 60 6D       	sacl    CONST127        ; constant for CALC subroutine
+0126   FB18 D0 01 80 00 	lalk    -32768
+0127   FB1A 60 6E       	sacl    FCOEF1
+0128   FB1B             ;	lalk    15949
+0129   FB1B D0 01 75 30 	lalk	30000		; just a try ... 
+0130   FB1D 60 6F       	sacl    FCOEF2           ; preemphasis filter coefficient
+0131   FB1E D0 01 19 39 	lalk    6457             ; 
+0132   FB20 60 70       	sacl    FCOEF3
+0133   FB21 CA 00       	zac
+0134   FB22             	;setup for serial in isr
+0135   FB22 60 68       	sacl    WHATBUF         ; start with buffer 0 for the first 64 samples
+0136   FB23 D7 00 06 80 	lrlk    AR7,INBUF1      ; inbuf pointer points to inbuf1
+0137   FB25 D0 01 06 C0 	lalk    INBUF2
+0138   FB27 60 6A       	sacl    INBUF           ; reset inbuf pointer
+0139   FB28             	;setup for serial out isr
+0140   FB28 C0 2C       	lark	AR0,44
+0141   FB29 70 69       	sar	AR0,OCNT	; reset outbuf word counter
+0142   FB2A D6 00 06 00 	lrlk    AR6,OUTBUF	; reset outbuf buffer pointer
+0143   FB2C CA 35       	lack    035h            ; Turn on XINT and RINT and INT2,0
+0144   FB2D 60 04       	sacl    IMR             ;
+0145   FB2E             
+0146   FB2E             		
+0147   FB2E             ;-------------------------------------------------------------------
+0148   FB2E             ; Main loop start
+0149   FB2E             ;
+0150   FB2E             ;-------------------------------------------------------------------
+0151   FB2E             
+0152   FB2E             mainloop:
+0153   FB2E 20 64       	lac     FLAG1
+0154   FB2F F6 80 FB 2E 	bz      mainloop        ; wait until a packet is xmitted
+0155   FB31             
+0156   FB31 CA 00       	lack    0               ; load accu with 0
+0157   FB32 60 64       	sacl    FLAG1           ; reset flag
+0158   FB33             
+0159   FB33             	;************ DIAGNOSTIC PULSE ***************
+0160   FB33             ;        lrlk    AR0,0FFFFh      ;
+0161   FB33             ;        larp    AR0
+0162   FB33             ;        rptk    2               ; read junk from address 0xFFFF
+0163   FB33             ;        lac     *,0,AR0         ; to pulse BR
+0164   FB33             
+0165   FB33             
+0166   FB33             ;-------------------------------------------------------------------
+0167   FB33             ;
+0168   FB33             ; Bit-interleaving.
+0169   FB33             ;
+0170   FB33             ; Destination buffer is outbuf (44 bytes)
+0171   FB33             ; Source is inbuf1 or 2 (64 bytes)
+0172   FB33             ;
+0173   FB33             ; Directly after the payload packet has been transmitted a flag is set.
+0174   FB33             ; The routine then starts with calculating the first 16 output bits, then
+0175   FB33             ; the following 16 and so on. During the calculation, transmission
+0176   FB33             ; of the first calculated data starts, but because calculation is faster
+0177   FB33             ; as transmitting, no overlap occurs.
+0178   FB33             ;
+0179   FB33             ; Used registers: Accu, AR0,AR1,AR2,AR3,AR4,AR5
+0180   FB33             ; Used data:      tempx
+0181   FB33             ;
+0182   FB33             ;-------------------------------------------------------------------
+0183   FB33             
+0184   FB33 C0 04       	lark    AR0,4           ; to add to input buffer pointer
+0185   FB34 D5 00 06 00 	lrlk    AR5,OUTBUF      ; reset outbuf pointer
+0186   FB36 31 6A       	lar     AR1,INBUF       ; reset input buffer pointer
+0187   FB37 C2 0A       	lark    AR2,10          ; reset output buffer word counter
+0188   FB38 C4 03       	lark    AR4,3           ; reset output buffer word counter (AR5*4+AR2)
+0189   FB39 55 89       	larp    AR1             ; arp = input buffer ptr
+0190   FB3A             
+0191   FB3A C3 07       intl1:  lark    AR3,7           ; reset output buffer bit counter
+0192   FB3B             
+0193   FB3B 20 80       intl2:  lac     *,0             ;1 load word from inbuf
+0194   FB3C CE 35       	ror                     ;1 shift rightmost bit in carry
+0195   FB3D 60 E0       	sacl    *0+             ;1 and store word to inbuf,arp=obuf word cntr
+0196   FB3E 20 60       	lac     TEMPX           ;1 get output word
+0197   FB3F CE 34       	rol                     ;1 shift bit in output word
+0198   FB40 60 60       	sacl    TEMPX           ;1 and store in temporalily register
+0199   FB41 20 80       	lac     *,0             ;1 load word from inbuf
+0200   FB42 CE 35       	ror                     ;1 shift rightmost bit in carry
+0201   FB43 60 EB       	sacl    *0+,0,AR3       ;1 and store word to inbuf,arp=obuf word cntr
+0202   FB44 20 60       	lac     TEMPX           ;1 get output word
+0203   FB45 CE 34       	rol                     ;1 shift bit in output word
+0204   FB46 60 60       	sacl    TEMPX           ;1 and store in temporalily register
+0205   FB47 FB 99 FB 3B 	banz    intl2,*-,AR1    ;2 if not all 16 bits filled do next
+0206   FB49             
+0207   FB49 55 8D       	larp    AR5             ; arp = output buffer pointer
+0208   FB4A 60 A9       	sacl    *+,0,AR1        ; and store in output buffer++.arp=inbuf ptr
+0209   FB4B 7F 40       	sbrk    64              ; inbufptr = inbufptr-64
+0210   FB4C             
+0211   FB4C 55 8A       	larp    AR2             ; arp=outbuf word counter
+0212   FB4D FB 99 FB 3A 	banz    intl1,*-,AR1    ; block of 11 words written? if not jump
+0213   FB4F             
+0214   FB4F C2 0A       	lark    AR2,10          ; reset word counter A
+0215   FB50 7E 01       	adrk    1               ; increment inbuf pointer
+0216   FB51 55 8C       	larp    AR4             ; arp=outbuf word counter B
+0217   FB52 FB 99 FB 3A 	banz    intl1,*-,AR1    ; branch if not finished
+0218   FB54             
+0219   FB54             	;end of bit interleaving !
+0220   FB54             
+0221   FB54             ;-------------------------------------------------------------------
+0222   FB54             ;
+0223   FB54             ; Companding, parity generation and range bit coding
+0224   FB54             ;
+0225   FB54             ; Source/destination is inbuf (64 bytes). The samples in inbuf are
+0226   FB54             ; 16 bits wide, signed. The 2 least significant bits are ignored.
+0227   FB54             ;
+0228   FB54             ; Used registers: Accu, AR0,AR1,AR2,AR3
+0229   FB54             ; Used data:      tempx
+0230   FB54             ;
+0231   FB54             ;-------------------------------------------------------------------
+0232   FB54             	
+0233   FB54 CE 1F       	idle                    ; wait until next serial interrupt. If
+0234   FB55             				; necessary a delay loop is placed before
+0235   FB55             				; this instruction to make sure there idle
+0236   FB55             				; always waits for the same interrupt!
+0237   FB55             				; This is needed because the AD conversion                                
+0238   FB55             				; is not synchronous with the NICAM clock.
+0239   FB55             
+0240   FB55             ;-------------------------------------------------------------------
+0241   FB55             ; Initiate aquiring 64 new samples and copy maximum values
+0242   FB55             ;-------------------------------------------------------------------
+0243   FB55             
+0244   FB55 CA 01       	lack    1
+0245   FB56 10 68       	sub     WHATBUF
+0246   FB57 60 68       	sacl    WHATBUF         ; Whatbuf = 1-whatbuf (1 or 0)
+0247   FB58 D0 00 06 C0 	lrlk    AR0,INBUF2
+0248   FB5A F6 80 FB 5E 	bz      ibuf2           ; test-which inbuf is filled ?
+0249   FB5C D0 00 06 80 	lrlk    AR0,INBUF1      ; it was 1
+0250   FB5E 70 6A       ibuf2:  sar     AR0,INBUF       ; store ptr to last filled inbuf
+0251   FB5F             
+0252   FB5F             ;-- calculate receive buffer end
+0253   FB5F             ;        larp    AR0
+0254   FB5F             ;        adrk    63              ; input buffer's end address
+0255   FB5F             ;        larp    AR7
+0256   FB5F             ;-- wait until receive buffer (pointed to by AR7) is full (= > to AR0)
+0257   FB5F             ;wloop:  cmpr    2               ; check if AR7 > AR0
+0258   FB5F             ;        bbz     wloop
+0259   FB5F             
+0260   FB5F CE 01       	dint                    ; disable interrupts
+0261   FB60 D7 00 06 80 	lrlk    AR7,INBUF1
+0262   FB62 9F 68       	bit     WHATBUF,0       ; which inbuf is selected ? -> WAS WHATBUF, 15!
+0263   FB63 F8 80 FB 67 	bbz     buf1            ; branch if it's buffer 1
+0264   FB65 D7 00 06 C0 	lrlk    AR7,INBUF2      ; INPTR points to the selected inbuf
+0265   FB67 CE 00       buf1:   eint                    ; enable interrupts
+0266   FB68             
+0267   FB68             ;-------------------------------------------------------------------
+0268   FB68             ; Do pre-emphasis filtering
+0269   FB68             ;-------------------------------------------------------------------
+0270   FB68             
+0271   FB68 31 6A       	lar     AR1,INBUF       ; AR1 is the sample pointer
+0272   FB69 32 6A       	lar     AR2,INBUF
+0273   FB6A 55 8A       	larp    AR2
+0274   FB6B 7F 02       	sbrk    2               ; AR2 points to the previous sample
+0275   FB6C             	
+0276   FB6C 20 73       	lac     X_PREVL         ; load last left sample of previous block
+0277   FB6D 60 A0       	sacl    *+              ; store in inbuf-2
+0278   FB6E 20 74       	lac     X_PREVR         ; load last right sample of previous block
+0279   FB6F 60 90       	sacl    *-              ; store in inbuf-1
+0280   FB70             
+0281   FB70 D3 00 07 C0 	lrlk    AR3,MAXBUF
+0282   FB72 D4 00 07 40 	lrlk    AR4,SABUF       ; AR4 points to the result buffer
+0283   FB74 C5 1F       	lark    AR5,31          ; nr of samples-1
+0284   FB75 55 89       	larp    AR1
+0285   FB76             
+0286   FB76 F7 80 FB 78 	bnv     pre_loop        ; clear overflow flag for clip indication
+0287   FB78             
+0288   FB78             pre_loop:                       ; (arp = AR1 now)
+0289   FB78             	;--------[ left channel ]-------------------
+0290   FB78 2F 8A       	lac     *,15,AR2        ; accu = current left sample * 1
+0291   FB79 3C A9       	lt      *+,AR1          ; t = previous left sample
+0292   FB7A 38 6E       	mpy     FCOEF1          ; p = t * -1
+0293   FB7B 3D 71       	lta     Y_PREVL         ; t = previous left result, a = a + p
+0294   FB7C 38 6F       	mpy     FCOEF2          ; p = t * 0.4867337441
+0295   FB7D 3D AC       	lta     *+,AR4          ; t = current left sample, a = a + p
+0296   FB7E 68 71       	sach    Y_PREVL         ; store left filter result
+0297   FB7F 38 70       	mpy     FCOEF3          ; x0.16 or so
+0298   FB80 CE 15       	apac                    ; a = a + p
+0299   FB81 48 75       	addh    CLIPVAL
+0300   FB82 44 75       	subh    CLIPVAL
+0301   FB83 44 75       	subh    CLIPVAL
+0302   FB84 48 75       	addh    CLIPVAL
+0303   FB85 69 AB       	sach    *+,1,AR3        ; store left result in sample_buf
+0304   FB86 CE 1B       	abs                     ; make absolute
+0305   FB87 69 A9       	sach    *+,1,AR1        ; and store in maxbuf
+0306   FB88             
+0307   FB88             	;--------[ right channel ]-------------------
+0308   FB88 2F 8A       	lac     *,15,AR2        ; accu = current right sample * 1
+0309   FB89 3C A9       	lt      *+,AR1          ; t = previous right sample
+0310   FB8A 38 6E       	mpy     FCOEF1          ; p = t * -1
+0311   FB8B 3D 72       	lta     Y_PREVR         ; t = previous right result, a = a + p
+0312   FB8C 38 6F       	mpy     FCOEF2          ; p = t * 0.4867337441
+0313   FB8D 3D AC       	lta     *+,AR4          ; t = current right sample, a = a + p
+0314   FB8E 68 72       	sach    Y_PREVR         ; store right filter result
+0315   FB8F 38 70       	mpy     FCOEF3          ; x0.16 or so
+0316   FB90 CE 15       	apac                    ; a = a + p
+0317   FB91 48 75       	addh    CLIPVAL
+0318   FB92 44 75       	subh    CLIPVAL
+0319   FB93 44 75       	subh    CLIPVAL
+0320   FB94 48 75       	addh    CLIPVAL
+0321   FB95 69 AB       	sach    *+,1,AR3        ; store right result in sample_buf
+0322   FB96 CE 1B       	abs                     ; make absolute
+0323   FB97 69 AD       	sach    *+,1,AR5        ; and store in maxbuf
+0324   FB98             
+0325   FB98 FB 99 FB 78 	banz    pre_loop,*-,AR1
+0326   FB9A             	
+0327   FB9A             	;---------[ store last samples ]--------------
+0328   FB9A             
+0329   FB9A 7F 02       	sbrk    2               ; sample counter - 2 (700 or 6c0->6FE,6BE)
+0330   FB9B 20 A0       	lac     *+              ; reload last left sample
+0331   FB9C 60 73       	sacl    X_PREVL
+0332   FB9D 20 80       	lac     *
+0333   FB9E 60 74       	sacl    X_PREVR
+0334   FB9F             
+0335   FB9F D0 01 07 40 	lalk    SABUF
+0336   FBA1 60 6A       	sacl    INBUF           ; let inbuf point to sbuf. Here are the filtered samples!
+0337   FBA2             
+0338   FBA2             ;-------------------------------------------------------------------
+0339   FBA2             ; check for clip
+0340   FBA2             ;-------------------------------------------------------------------
+0341   FBA2             
+0342   FBA2 F7 80 FB A8 	bnv     no_clip         ; if an overflow occurred, signal is clipped!
+0343   FBA4 D0 01 44 00 	lalk	04400h
+0344   FBA6 60 76       	sacl	LPEAK
+0345   FBA7 60 77       	sacl	RPEAK		; set overflow bits
+0346   FBA8             no_clip:
+0347   FBA8             
+0348   FBA8             ;-------------------------------------------------------------------
+0349   FBA8             ; determine range of left channel (0..7)
+0350   FBA8             ;-------------------------------------------------------------------
+0351   FBA8             
+0352   FBA8             	;arp = AR1
+0353   FBA8 C0 02       	lark    AR0,2           ; step size
+0354   FBA9 D1 00 07 C0 	lrlk    AR1,MAXBUF      ; pointer to maxbuf
+0355   FBAB D0 01 01 FF 	lalk    01ffh           ; minimum value (7 bits used=range 0/1)
+0356   FBAD CB 1F       	rptk    31              ; repeat 32 times (all left channel samples)
+0357   FBAE 4D E0       	or      *0+             ; or with the left channel samples
+0358   FBAF 60 65       	sacl    LMAX            ; store low accu
+0359   FBB0             
+0360   FBB0 40 65       	zalh    LMAX            ; and load in high accu
+0361   FBB1 C1 09       	lark    AR1,9
+0362   FBB2             drangel:
+0363   FBB2 7F 01       	sbrk    1
+0364   FBB3 CE 34       	rol
+0365   FBB4 5F 80 FB B2 	bnc     drangel         ; if bit=0 decrement range
+0366   FBB6             	;in AR1 is the range (1..7)
+0367   FBB6 71 65       	sar     AR1,LMAX        ; store range in LMAX
+0368   FBB7             
+0369   FBB7             ;-------------------------------------------------------------------
+0370   FBB7             ; determine range of right channel
+0371   FBB7             ;-------------------------------------------------------------------
+0372   FBB7             
+0373   FBB7 C0 02       	lark    AR0,2           ; step size
+0374   FBB8 D1 00 07 C1 	lrlk    AR1,MAXBUF+1    ; pointer to maxbuf+1 (1st right sample)
+0375   FBBA D0 01 01 FF 	lalk    01ffh           ; minimum value (7 bits used=range 0/1)
+0376   FBBC CB 1F       	rptk    31              ; repeat 32 times (all right channel samples)
+0377   FBBD 4D E0       	or      *0+             ; or with the right channel samples
+0378   FBBE 60 66       	sacl    RMAX            ; store low accu
+0379   FBBF             
+0380   FBBF 40 66       	zalh    RMAX
+0381   FBC0 C1 09       	lark    AR1,9
+0382   FBC1 55 89       	larp    AR1
+0383   FBC2 DF 05 03 FF 	ork     03ffh,15        ; make 9 LSB's 1 (lower range is not possible)
+0384   FBC4             dranger:
+0385   FBC4 7F 01       	sbrk    1
+0386   FBC5 CE 34       	rol
+0387   FBC6 5F 80 FB C4 	bnc     dranger         ; if bit=0 decrement range
+0388   FBC8             	;in AR1 is the range (1..7)
+0389   FBC8 71 66       	sar     AR1,RMAX        ; store range in RMAX
+0390   FBC9             
+0391   FBC9             
+0392   FBC9             ;-------------------------------------------------------------------------------
+0393   FBC9             ; Update clip indicator
+0394   FBC9             ;
+0395   FBC9             ; Indicator works as following:
+0396   FBC9             ; The LMAX and RMAX registers contain the range. This ranges from 0 to 7 (3 bits)
+0397   FBC9             ; First, the range bits are loaded in accu as following (left shifted 11 positions):
+0398   FBC9             ; 00rr r000 0000 0000
+0399   FBC9             ; then bit 10 is set high to 'add +0,5'.
+0400   FBC9             ; 00rr r100 0000 0000
+0401   FBC9             ; This value is compared to the value in the lpeak register. If larger, the
+0402   FBC9             ; lpeak register is overwritten by the new value.
+0403   FBC9             ; If the lpeak register is larger, the value in the lpeak register is decremented
+0404   FBC9             ; by 15.
+0405   FBC9             ; If a clip occurred, a value of 0110 0100 0000 0000 is written to the lpeak
+0406   FBC9             ; register to light all the LEDs. (this equals range 8 - 6 dB above maximum)
+0407   FBC9             ;
+0408   FBC9             ; Then the value of the LPEAK register is read and shifted left 5 bits, the high
+0409   FBC9             ; accu looks like this:
+0410   FBC9             ; 0000 0000 0000 0rrr
+0411   FBC9             ; This value is used to read the LED pattern from a table.
+0412   FBC9             ;-------------------------------------------------------------------------------
+0413   FBC9             
+0414   FBC9             	;see if lmax is higher as previous lmax
+0415   FBC9 2B 65       	lac	LMAX,11		; load accu with l range (0..7)
+0416   FBCA D0 05 04 00 	ork	0400h		; add 0.5 (sorry, can't explain...)
+0417   FBCC 10 76       	sub	LPEAK		; subtract current peak value
+0418   FBCD 5F 80 FB D4 	bnc	lnoupd		; if carry = 0, lpeak was higher as lmax
+0419   FBCF 2B 65       	lac	LMAX,11
+0420   FBD0 D0 05 04 00 	ork	0400h		; add 0.5 (sorry, can't explain...)
+0421   FBD2 FF 80 FB D9 	b	lcont
+0422   FBD4 20 76       lnoupd:	lac	LPEAK
+0423   FBD5 CD 0F       	subk	15
+0424   FBD6 5E 80 FB D9 	bc	lcont		; if carry=set, lpeak is < 0
+0425   FBD8 CA 00       	lack	0
+0426   FBD9 60 76       lcont:	sacl	LPEAK
+0427   FBDA             
+0428   FBDA             	;see if rmax is higher as previous rpeak
+0429   FBDA 2B 66       	lac	RMAX,11		; load accu with l range (0..7)
+0430   FBDB D0 05 04 00 	ork	0400h		; add 0.5 (sorry, can't explain...)
+0431   FBDD 10 77       	sub	RPEAK		; subtract current peak value
+0432   FBDE 5F 80 FB E5 	bnc	rnoupd		; if carry = 0, lpeak was higher as lmax
+0433   FBE0 2B 66       	lac	RMAX,11
+0434   FBE1 D0 05 04 00 	ork	0400h		; add 0.5 (sorry, can't explain...)
+0435   FBE3 FF 80 FB EA 	b	rcont
+0436   FBE5 20 77       rnoupd:	lac	RPEAK
+0437   FBE6 CD 0F       	subk	15
+0438   FBE7 5E 80 FB EA 	bc	rcont		; if carry=set, lpeak is < 0
+0439   FBE9 CA 00       	lack	0
+0440   FBEA 60 77       rcont:	sacl	RPEAK
+0441   FBEB             
+0442   FBEB             	;update LED register
+0443   FBEB 25 76       	lac     LPEAK,5         ; load peak, high accu bit0..2 contain 0..7
+0444   FBEC 68 78       	sach	TMP
+0445   FBED 20 78       	lac	TMP
+0446   FBEE D0 02 FC AE 	adlk    LVUTAB          ; add base address of vutable
+0447   FBF0 58 79       	tblr    LVUREG          ; store pattern in VU register
+0448   FBF1             
+0449   FBF1 25 77       	lac     RPEAK,5         ; load peak, high accu bit0..2 contain 0..7
+0450   FBF2 68 78       	sach	TMP
+0451   FBF3 20 78       	lac	TMP
+0452   FBF4 D0 02 FC B9 	adlk    RVUTAB          ; add base address of vutable
+0453   FBF6 58 7A       	tblr    RVUREG          ; store pattern in VU register
+0454   FBF7             
+0455   FBF7 D0 00 FF FF         lrlk    AR0,0FFFFh      ;
+0456   FBF9 55 88               larp    AR0
+0457   FBFA 20 79       	lac	LVUREG
+0458   FBFB 4D 7A       	or	RVUREG		
+0459   FBFC 60 80       	sacl	*
+0460   FBFD             
+0461   FBFD             
+0462   FBFD             ;-------------------------------------------------------------------
+0463   FBFD             ; Build payload block
+0464   FBFD             ;-------------------------------------------------------------------
+0465   FBFD             
+0466   FBFD             
+0467   FBFD             	;--------------------------------------
+0468   FBFD             	; Start with left channel...
+0469   FBFD             	;--------------------------------------
+0470   FBFD DE 01 00 01 	lalk    1,14            ; accu = 2^14
+0471   FBFF 30 65       	lar     AR0,LMAX
+0472   FC00 55 88       	larp    AR0
+0473   FC01 7F 01       	sbrk    1               ; ar0 is now 0..6.
+0474   FC02 FB 90 FC 06 	banz    calc1,*-        ; if not 0 jump
+0475   FC04 FF 80 FC 0D 	b       calc4           ; if 0, MAX was 1 and Accu stays 2^14
+0476   FC06 FB 90 FC 0B calc1:  banz    calc3,*-
+0477   FC08 FF 80 FC 0D 	b       calc4           ; if 0 now, MAX was 2 and accu stays 2^14
+0478   FC0A             
+0479   FC0A CE 19       calc2:  sfr
+0480   FC0B FB 90 FC 0A calc3:  banz    calc2,*-
+0481   FC0D             
+0482   FC0D             calc4:  ; in accu is now 2^14 (range=3) .. 2^10 (if range=7)
+0483   FC0D 60 60       	sacl    TEMPX
+0484   FC0E 3C 60       	lt      TEMPX           ; T register for shifting
+0485   FC0F             
+0486   FC0F 20 65       	lac     LMAX            ; load scale factor
+0487   FC10 D0 02 FC A6 	adlk    SCALETAB        ; add base address of scaletable
+0488   FC12 58 65       	tblr    LMAX            ; read right factor!
+0489   FC13             
+0490   FC13 C0 06       	lark    AR0,6           ; step size
+0491   FC14 55 89       	larp    AR1
+0492   FC15             
+0493   FC15             	;--------------------------------------
+0494   FC15             	; samples 0,6,12,18,24,30,36,42,48
+0495   FC15             	;--------------------------------------
+0496   FC15 28 65       	lac     LMAX,8          ; bit 10=rangebit 2L 
+0497   FC16             
+0498   FC16 D0 04 04 00 	andk    0400h           ; mask bit 10
+0499   FC18 60 67       	sacl    SIP             ; store in SIP register
+0500   FC19 C2 08       	lark    AR2,8
+0501   FC1A 31 6A       	lar     AR1,INBUF
+0502   FC1B FE 80 FC 74 	call    CALC
+0503   FC1D             	;--------------------------------------
+0504   FC1D             	; samples 2,8,14,20,26,32,38,44,50
+0505   FC1D             	;--------------------------------------
+0506   FC1D 29 65       	lac     LMAX,9          ; bit 10=rangebit 1L
+0507   FC1E D0 04 04 00 	andk    0400h           ; mask bit 10
+0508   FC20 60 67       	sacl    SIP             ; store in SIP register
+0509   FC21 C2 08       	lark    AR2,8
+0510   FC22 31 6A       	lar     AR1,INBUF
+0511   FC23 7E 02       	adrk    2               ; inbuf + 2 for samples 2,8 enz.
+0512   FC24 FE 80 FC 74 	call    CALC
+0513   FC26             	;--------------------------------------
+0514   FC26             	; samples 4,10,16,22,28,34,40,46,52
+0515   FC26             	;--------------------------------------
+0516   FC26 2A 65       	lac     LMAX,10         ; bit 10=rangebit 0L
+0517   FC27 D0 04 04 00 	andk    0400h           ; mask bit 10
+0518   FC29 60 67       	sacl    SIP             ; store in SIP register
+0519   FC2A C2 08       	lark    AR2,8
+0520   FC2B 31 6A       	lar     AR1,INBUF
+0521   FC2C 7E 04       	adrk    4               ; inbuf + 4 for samples 4,10 enz.
+0522   FC2D FE 80 FC 74 	call    CALC
+0523   FC2F             	;--------------------------------------
+0524   FC2F             	; samples 54,56,58,60,62
+0525   FC2F             	;--------------------------------------
+0526   FC2F CA 00       	zac
+0527   FC30 60 67       	sacl    SIP             ; store 0 in SIP register (cb0/1=0)
+0528   FC31 C2 04       	lark    AR2,4
+0529   FC32 C0 02       	lark    AR0,2           ; step size is 2 now (54+2=56 ...)
+0530   FC33 31 6A       	lar     AR1,INBUF
+0531   FC34 7E 36       	adrk    54              ; inbuf + 54 for samples 54,56 enz.
+0532   FC35 FE 80 FC 74 	call    CALC
+0533   FC37             		
+0534   FC37             
+0535   FC37             	;--------------------------------------
+0536   FC37             	; Right channel
+0537   FC37             	;--------------------------------------
+0538   FC37 DE 01 00 01 	lalk    1,14            ; accu = 2^14
+0539   FC39 30 66       	lar     AR0,RMAX
+0540   FC3A 55 88       	larp    AR0
+0541   FC3B 7F 01       	sbrk    1               ; ar0 is now 0..6.
+0542   FC3C FB 90 FC 40 	banz    calc5,*-        ; if not 0 jump
+0543   FC3E FF 80 FC 47 	b       calc8           ; if 0, MAX was 1 and Accu stays 2^14
+0544   FC40 FB 90 FC 45 calc5:  banz    calc7,*-
+0545   FC42 FF 80 FC 47 	b       calc8           ; if 0 now, MAX was 2 and accu stays 2^14
+0546   FC44             
+0547   FC44 CE 19       calc6:  sfr
+0548   FC45 FB 90 FC 44 calc7:  banz    calc6,*-
+0549   FC47             
+0550   FC47             calc8:  ; in accu is now 2^14 (range=3) .. 2^10 (if range=7)
+0551   FC47 60 60       	sacl    TEMPX
+0552   FC48 3C 60       	lt      TEMPX           ; T register for shifting
+0553   FC49             
+0554   FC49 20 66       	lac     RMAX            ; load scale factor
+0555   FC4A D0 02 FC A6 	adlk    SCALETAB        ; add base address of scaletable
+0556   FC4C 58 66       	tblr    RMAX            ; read right factor!
+0557   FC4D             
+0558   FC4D C0 06       	lark    AR0,6           ; step size
+0559   FC4E 55 89       	larp    AR1
+0560   FC4F             
+0561   FC4F             	;--------------------------------------
+0562   FC4F             	; samples 1,7,13,19,25,31,37,43,49
+0563   FC4F             	;--------------------------------------
+0564   FC4F 28 66       	lac     RMAX,8          ; bit 10=rangebit 2R
+0565   FC50 D0 04 04 00 	andk    0400h           ; mask bit 10
+0566   FC52 60 67       	sacl    SIP             ; store in SIP register
+0567   FC53 C2 08       	lark    AR2,8
+0568   FC54 31 6A       	lar     AR1,INBUF
+0569   FC55 7E 01       	adrk    1               ; inbuf + 1 for samples 1,7 enz
+0570   FC56 FE 80 FC 74 	call    CALC
+0571   FC58             	;--------------------------------------
+0572   FC58             	; samples 3,9,15,21,27,33,39,45,51
+0573   FC58             	;--------------------------------------
+0574   FC58 29 66       	lac     RMAX,9          ; bit 10=rangebit 1L
+0575   FC59 D0 04 04 00 	andk    0400h           ; mask bit 10
+0576   FC5B 60 67       	sacl    SIP             ; store in SIP register
+0577   FC5C C2 08       	lark    AR2,8
+0578   FC5D 31 6A       	lar     AR1,INBUF
+0579   FC5E 7E 03       	adrk    3               ; inbuf + 3 for samples 3,9 enz.
+0580   FC5F FE 80 FC 74 	call    CALC
+0581   FC61             	;--------------------------------------
+0582   FC61             	; samples 5,11,17,23,29,35,41,47,53
+0583   FC61             	;--------------------------------------
+0584   FC61 2A 66       	lac     RMAX,10         ; bit 10=rangebit 0L
+0585   FC62 D0 04 04 00 	andk    0400h           ; mask bit 10
+0586   FC64 60 67       	sacl    SIP             ; store in SIP register
+0587   FC65 C2 08       	lark    AR2,8
+0588   FC66 31 6A       	lar     AR1,INBUF
+0589   FC67 7E 05       	adrk    5               ; inbuf + 4 for samples 5,11 enz.
+0590   FC68 FE 80 FC 74 	call    CALC
+0591   FC6A             	;--------------------------------------
+0592   FC6A             	; samples 55,57,59,61,63
+0593   FC6A             	;--------------------------------------
+0594   FC6A CA 00       	zac
+0595   FC6B 60 67       	sacl    SIP             ; store 0 in SIP register (cb0/1=0)
+0596   FC6C C2 04       	lark    AR2,4
+0597   FC6D C0 02       	lark    AR0,2           ; step size is 2 now
+0598   FC6E 31 6A       	lar     AR1,INBUF
+0599   FC6F 7E 37       	adrk    55              ; inbuf + 54 for samples 55,57 enz.
+0600   FC70 FE 80 FC 74 	call    CALC
+0601   FC72             
+0602   FC72             	;--------[end of calculating]----------------------------------------
+0603   FC72             
+0604   FC72             ;        ;************ DIAGNOSTIC PULSE ***************
+0605   FC72             ;        lrlk    AR0,0FFFFh      ;
+0606   FC72             ;        larp    AR0
+0607   FC72             ;        rptk    2               ; read junk from address 0xFFFF
+0608   FC72             ;        lac     *,0,AR0         ; to pulse BR
+0609   FC72             ;
+0610   FC72 FF 80 FB 2E 	b       mainloop
+0611   FC74             
+0612   FC74             
+0613   FC74             
+0614   FC74             ;----------------------------------------------------------------------------
+0615   FC74             ; CALC
+0616   FC74             ; 
+0617   FC74             ; Shift the samples, calculate the parity bit and xor with range bit.
+0618   FC74             ; AR1 is the input buffer pointer
+0619   FC74             ; AR2 counts the number of bytes
+0620   FC74             ; AR0 contains the step size
+0621   FC74             ; T contains the sample multiplier (to shift-optionally volume control!)
+0622   FC74             ; SIP contains the signalling in parity bit
+0623   FC74             ;
+0624   FC74             ; uses A,T,P
+0625   FC74             ;
+0626   FC74             ; cycle time (including call): 14 cycles
+0627   FC74             ;----------------------------------------------------------------------------
+0628   FC74             
+0629   FC74 CF 80       CALC:   mpyu    *               ; P=T*(AR1) - in P is now the shifted sample
+0630   FC75 7D 80       	sph     *               ; store result
+0631   FC76 2C 80       	lac     *,12            ; load shifted sample bit 4..9 in high accu
+0632   FC77 68 80       	sach    *               ; and store in memlocation
+0633   FC78 20 80       	lac     *               ; and reload. In low accu is bit 4..9 of sample
+0634   FC79 4E 6D       	and     CONST127        ; remove unused bits (if sample was negative)
+0635   FC7A D0 02 FC C4 	adlk    PARTAB          ; add parity table address
+0636   FC7C 58 80       	tblr    *               ; store parity bit
+0637   FC7D 40 67       	zalh    SIP             ; load signal. in parity bit (bit 10,=0/1)
+0638   FC7E 48 80       	addh    *               ; add parity bit
+0639   FC7F CE 15       	apac                    ; add sample
+0640   FC80 68 EA       	sach    *0+,0,AR2       ; store result and inc inbufptr with AR0
+0641   FC81 FB 99 FC 74 	banz    CALC,*-,AR1     ; all samples done?
+0642   FC83 CE 26       	ret                     ; end of subroutine!    
+0643   FC84             
+0644   FC84             
+0645   FC84             ;-----------------------------------------------------------------
+0646   FC84             ; Interrupt 0 routine
+0647   FC84             ;
+0648   FC84             ; uses: AR6
+0649   FC84             ;
+0650   FC84             ; This routine is called when the LCA gives an interrupt (on bitcnt 7).
+0651   FC84             ; Then the output word counter is set to 43 (word 1).
+0652   FC84             ; This synchronises the serial output data stream with the nicam
+0653   FC84             ; clock.
+0654   FC84             ;
+0655   FC84             ;-----------------------------------------------------------------
+0656   FC84             
+0657   FC84 79 61       INT0:   sst1    STAT1           ;Recover ARP from ARB by LST1 last
+0658   FC85 77 6C       	sar	AR7,AR7STORE	;save AR7	
+0659   FC86 C7 2B       	lark    AR7,43          
+0660   FC87 77 69       	sar	AR7,OCNT	;set word counter to word 1.
+0661   FC88 37 6C       	lar	AR7,AR7STORE	;restore AR7
+0662   FC89 51 61       	lst1    STAT1           ;reload status and ARP
+0663   FC8A CE 00       	eint                    ;enable for next interrupt
+0664   FC8B CE 26       	ret                     ;
+0665   FC8C             
+0666   FC8C             
+0667   FC8C             ;-----------------------------------------------------------------
+0668   FC8C             ; serial interrupt transmit routine
+0669   FC8C             ;
+0670   FC8C             ; uses:    AR6             (registers)
+0671   FC8C             ;          STAT1,OCNT      (data memory)
+0672   FC8C             ;  	   AR7STORE
+0673   FC8C             ; updates: DXR, OCNT, AR6
+0674   FC8C             ;
+0675   FC8C             ; AR6 is for the serial xmit routine only and contains the pointer
+0676   FC8C             ; to the output buffer.
+0677   FC8C             ; The original value in AR7 is stored, then AR7 serves as a temp.
+0678   FC8C             ; storage register and then holds the output word count. After updating
+0679   FC8C             ;-----------------------------------------------------------------
+0680   FC8C             
+0681   FC8C 79 61       XINT:   sst1    STAT1           ;Recover ARP from ARB by LST1 last
+0682   FC8D 77 6C       	sar	AR7,AR7STORE	;save AR7 value
+0683   FC8E 55 8E       	larp	AR6
+0684   FC8F 37 AF       	lar	AR7,*+,AR7	;load new value in AR7, increment AR6 (obufptr), arp=AR7
+0685   FC90 77 01       	sar	AR7,DXR		;write value in AR7 to DX register
+0686   FC91 37 69       	lar	AR7,OCNT	;load word counter in AR7
+0687   FC92 FB 90 FC 98 	banz	noend,*-	;compare with 0 and decrement, jump is not 0
+0688   FC94 C7 2C       	lark	AR7,44		;reset output word counter
+0689   FC95 D6 00 06 00 	lrlk	AR6,OUTBUF	;reset outbuf pointer
+0690   FC97 77 64       	sar	AR7,FLAG1	;set flag to indicate end of packet transmit
+0691   FC98             
+0692   FC98 77 69       noend:	sar	AR7,OCNT	;write ar7 back to output word count register
+0693   FC99 37 6C       	lar	AR7,AR7STORE	;restore AR7
+0694   FC9A 51 61       	lst1    STAT1           ;reload status and ARP
+0695   FC9B CE 00       	eint                    ;enable for next interrupt
+0696   FC9C CE 26       	ret			;
+0697   FC9D             
+0698   FC9D             
+0699   FC9D             ;-----------------------------------------------------------------
+0700   FC9D             ; serial interrupt receive routine
+0701   FC9D             ;
+0702   FC9D             ;       STAT1, AR6/7STORE      (data memory)  
+0703   FC9D             ;
+0704   FC9D             ; The routine reads the sample from the serial port and writes it
+0705   FC9D             ; to the buffer.
+0706   FC9D             ;-----------------------------------------------------------------
+0707   FC9D             
+0708   FC9D 79 61       RINT:   sst1    STAT1           ; Recover ARP from ARB by LST1 last
+0709   FC9E 76 6B       	sar     AR6,AR6STORE    ; store AR6
+0710   FC9F             	
+0711   FC9F 55 8F       	larp    AR7
+0712   FCA0 36 00       	lar     AR6,DRR         ; get sample
+0713   FCA1 76 A0       	sar     AR6,*+          ; and store in buffer
+0714   FCA2             
+0715   FCA2 36 6B       	lar     AR6,AR6STORE    ; reload AR6
+0716   FCA3 51 61       	lst1    STAT1           ; reload status and ARP
+0717   FCA4 CE 00       	eint                    ; enable for next interrupt
+0718   FCA5 CE 26       	ret                     ;
+0719   FCA6             
+0720   FCA6             
+0721   FCA6             
+0722   FCA6             ;******************************************************************
+0723   FCA6             
+0724   FCA6             SCALETAB:                       ; don't ask me why, but
+0725   FCA6 00 00       	.word   0               ; the xmitted scale factor
+0726   FCA7 00 01       	.word   1               ; differs in the calculated
+0727   FCA8 00 02       	.word   2               ; scale factor: 3 and 4 are exchanged.
+0728   FCA9 00 04       	.word   4               ; this table is used to swap them
+0729   FCAA 00 03       	.word   3
+0730   FCAB 00 05       	.word   5
+0731   FCAC 00 06       	.word   6
+0732   FCAD 00 07       	.word   7
+0733   FCAE             
+0734   FCAE             
+0735   FCAE             ;---------------------
+0736   FCAE             ; Peak indicator: D0,2,4,6 = 0,-6,-12,-18 dB left channel
+0737   FCAE             ;                 D1,3,5,7 = 0,-6,-12,-18 dB right channel
+0738   FCAE             
+0739   FCAE             LVUTAB:
+0740   FCAE 00 00       	.word	00000000b	; 0
+0741   FCAF 00 00       	.word	00000000b
+0742   FCB0 00 00       	.word	00000000b
+0743   FCB1 00 00       	.word	00000000b
+0744   FCB2 00 00       	.word	00000000b
+0745   FCB3 00 80       	.word	10000000b	; 5
+0746   FCB4 00 A0       	.word	10100000b
+0747   FCB5 00 A8       	.word	10101000b	; 7
+0748   FCB6 00 AA       	.word	10101010b	; clip
+0749   FCB7 00 AA       	.word	10101010b	; clip
+0750   FCB8 00 AA       	.word	10101010b	; clip
+0751   FCB9             
+0752   FCB9             RVUTAB:
+0753   FCB9 00 00       	.word	00000000b	; 0
+0754   FCBA 00 00       	.word	00000000b
+0755   FCBB 00 00       	.word	00000000b
+0756   FCBC 00 00       	.word	00000000b
+0757   FCBD 00 00       	.word	00000000b
+0758   FCBE 00 40       	.word	01000000b	; 5
+0759   FCBF 00 50       	.word	01010000b
+0760   FCC0 00 54       	.word	01010100b	; 7
+0761   FCC1 00 55       	.word	01010101b	; clip
+0762   FCC2 00 55       	.word	01010101b	; clip
+0763   FCC3 00 55       	.word	01010101b	; clip
+0764   FCC4             
+0765   FCC4             	.include "nicamtab.bin"
+0001+  FCC4             
+0002+  FCC4             ; Nicam parity table.
+0003+  FCC4             ; Length = 64 words
+0004+  FCC4             ; Generated 07-31-1997
+0005+  FCC4             ; (C) PE1OBW 1997
+0006+  FCC4             
+0007+  FCC4             PARTAB:
+0008+  FCC4 00 00           .word 0h     ;0000000000000000
+0009+  FCC5 04 00           .word 400h     ;0000000000000001
+0010+  FCC6 04 00           .word 400h     ;0000000000000010
+0011+  FCC7 00 00           .word 0h     ;0000000000000011
+0012+  FCC8 04 00           .word 400h     ;0000000000000100
+0013+  FCC9 00 00           .word 0h     ;0000000000000101
+0014+  FCCA 00 00           .word 0h     ;0000000000000110
+0015+  FCCB 04 00           .word 400h     ;0000000000000111
+0016+  FCCC 04 00           .word 400h     ;0000000000001000
+0017+  FCCD 00 00           .word 0h     ;0000000000001001
+0018+  FCCE 00 00           .word 0h     ;0000000000001010
+0019+  FCCF 04 00           .word 400h     ;0000000000001011
+0020+  FCD0 00 00           .word 0h     ;0000000000001100
+0021+  FCD1 04 00           .word 400h     ;0000000000001101
+0022+  FCD2 04 00           .word 400h     ;0000000000001110
+0023+  FCD3 00 00           .word 0h     ;0000000000001111
+0024+  FCD4 04 00           .word 400h     ;0000000000010000
+0025+  FCD5 00 00           .word 0h     ;0000000000010001
+0026+  FCD6 00 00           .word 0h     ;0000000000010010
+0027+  FCD7 04 00           .word 400h     ;0000000000010011
+0028+  FCD8 00 00           .word 0h     ;0000000000010100
+0029+  FCD9 04 00           .word 400h     ;0000000000010101
+0030+  FCDA 04 00           .word 400h     ;0000000000010110
+0031+  FCDB 00 00           .word 0h     ;0000000000010111
+0032+  FCDC 00 00           .word 0h     ;0000000000011000
+0033+  FCDD 04 00           .word 400h     ;0000000000011001
+0034+  FCDE 04 00           .word 400h     ;0000000000011010
+0035+  FCDF 00 00           .word 0h     ;0000000000011011
+0036+  FCE0 04 00           .word 400h     ;0000000000011100
+0037+  FCE1 00 00           .word 0h     ;0000000000011101
+0038+  FCE2 00 00           .word 0h     ;0000000000011110
+0039+  FCE3 04 00           .word 400h     ;0000000000011111
+0040+  FCE4 04 00           .word 400h     ;0000000000100000
+0041+  FCE5 00 00           .word 0h     ;0000000000100001
+0042+  FCE6 00 00           .word 0h     ;0000000000100010
+0043+  FCE7 04 00           .word 400h     ;0000000000100011
+0044+  FCE8 00 00           .word 0h     ;0000000000100100
+0045+  FCE9 04 00           .word 400h     ;0000000000100101
+0046+  FCEA 04 00           .word 400h     ;0000000000100110
+0047+  FCEB 00 00           .word 0h     ;0000000000100111
+0048+  FCEC 00 00           .word 0h     ;0000000000101000
+0049+  FCED 04 00           .word 400h     ;0000000000101001
+0050+  FCEE 04 00           .word 400h     ;0000000000101010
+0051+  FCEF 00 00           .word 0h     ;0000000000101011
+0052+  FCF0 04 00           .word 400h     ;0000000000101100
+0053+  FCF1 00 00           .word 0h     ;0000000000101101
+0054+  FCF2 00 00           .word 0h     ;0000000000101110
+0055+  FCF3 04 00           .word 400h     ;0000000000101111
+0056+  FCF4 00 00           .word 0h     ;0000000000110000
+0057+  FCF5 04 00           .word 400h     ;0000000000110001
+0058+  FCF6 04 00           .word 400h     ;0000000000110010
+0059+  FCF7 00 00           .word 0h     ;0000000000110011
+0060+  FCF8 04 00           .word 400h     ;0000000000110100
+0061+  FCF9 00 00           .word 0h     ;0000000000110101
+0062+  FCFA 00 00           .word 0h     ;0000000000110110
+0063+  FCFB 04 00           .word 400h     ;0000000000110111
+0064+  FCFC 04 00           .word 400h     ;0000000000111000
+0065+  FCFD 00 00           .word 0h     ;0000000000111001
+0066+  FCFE 00 00           .word 0h     ;0000000000111010
+0067+  FCFF 04 00           .word 400h     ;0000000000111011
+0068+  FD00 00 00           .word 0h     ;0000000000111100
+0069+  FD01 04 00           .word 400h     ;0000000000111101
+0070+  FD02 04 00           .word 400h     ;0000000000111110
+0071+  FD03 00 00           .word 0h     ;0000000000111111
+0072+  FD04             
+0073+  FD04 04 00           .word 400h     ;0000000000000000
+0074+  FD05 00 00           .word 0h     ;0000000000000001
+0075+  FD06 00 00           .word 0h     ;0000000000000010
+0076+  FD07 04 00           .word 400h     ;0000000000000011
+0077+  FD08 00 00           .word 0h     ;0000000000000100
+0078+  FD09 04 00           .word 400h     ;0000000000000101
+0079+  FD0A 04 00           .word 400h     ;0000000000000110
+0080+  FD0B 00 00           .word 0h     ;0000000000000111
+0081+  FD0C 00 00           .word 0h     ;0000000000001000
+0082+  FD0D 04 00           .word 400h     ;0000000000001001
+0083+  FD0E 04 00           .word 400h     ;0000000000001010
+0084+  FD0F 00 00           .word 0h     ;0000000000001011
+0085+  FD10 04 00           .word 400h     ;0000000000001100
+0086+  FD11 00 00           .word 0h     ;0000000000001101
+0087+  FD12 00 00           .word 0h     ;0000000000001110
+0088+  FD13 04 00           .word 400h     ;0000000000001111
+0089+  FD14 00 00           .word 0h     ;0000000000010000
+0090+  FD15 04 00           .word 400h     ;0000000000010001
+0091+  FD16 04 00           .word 400h     ;0000000000010010
+0092+  FD17 00 00           .word 0h     ;0000000000010011
+0093+  FD18 04 00           .word 400h     ;0000000000010100
+0094+  FD19 00 00           .word 0h     ;0000000000010101
+0095+  FD1A 00 00           .word 0h     ;0000000000010110
+0096+  FD1B 04 00           .word 400h     ;0000000000010111
+0097+  FD1C 04 00           .word 400h     ;0000000000011000
+0098+  FD1D 00 00           .word 0h     ;0000000000011001
+0099+  FD1E 00 00           .word 0h     ;0000000000011010
+0100+  FD1F 04 00           .word 400h     ;0000000000011011
+0101+  FD20 00 00           .word 0h     ;0000000000011100
+0102+  FD21 04 00           .word 400h     ;0000000000011101
+0103+  FD22 04 00           .word 400h     ;0000000000011110
+0104+  FD23 00 00           .word 0h     ;0000000000011111
+0105+  FD24 00 00           .word 0h     ;0000000000100000
+0106+  FD25 04 00           .word 400h     ;0000000000100001
+0107+  FD26 04 00           .word 400h     ;0000000000100010
+0108+  FD27 00 00           .word 0h     ;0000000000100011
+0109+  FD28 04 00           .word 400h     ;0000000000100100
+0110+  FD29 00 00           .word 0h     ;0000000000100101
+0111+  FD2A 00 00           .word 0h     ;0000000000100110
+0112+  FD2B 04 00           .word 400h     ;0000000000100111
+0113+  FD2C 04 00           .word 400h     ;0000000000101000
+0114+  FD2D 00 00           .word 0h     ;0000000000101001
+0115+  FD2E 00 00           .word 0h     ;0000000000101010
+0116+  FD2F 04 00           .word 400h     ;0000000000101011
+0117+  FD30 00 00           .word 0h     ;0000000000101100
+0118+  FD31 04 00           .word 400h     ;0000000000101101
+0119+  FD32 04 00           .word 400h     ;0000000000101110
+0120+  FD33 00 00           .word 0h     ;0000000000101111
+0121+  FD34 04 00           .word 400h     ;0000000000110000
+0122+  FD35 00 00           .word 0h     ;0000000000110001
+0123+  FD36 00 00           .word 0h     ;0000000000110010
+0124+  FD37 04 00           .word 400h     ;0000000000110011
+0125+  FD38 00 00           .word 0h     ;0000000000110100
+0126+  FD39 04 00           .word 400h     ;0000000000110101
+0127+  FD3A 04 00           .word 400h     ;0000000000110110
+0128+  FD3B 00 00           .word 0h     ;0000000000110111
+0129+  FD3C 00 00           .word 0h     ;0000000000111000
+0130+  FD3D 04 00           .word 400h     ;0000000000111001
+0131+  FD3E 04 00           .word 400h     ;0000000000111010
+0132+  FD3F 00 00           .word 0h     ;0000000000111011
+0133+  FD40 04 00           .word 400h     ;0000000000111100
+0134+  FD41 00 00           .word 0h     ;0000000000111101
+0135+  FD42 00 00           .word 0h     ;0000000000111110
+0136+  FD43 04 00           .word 400h     ;0000000000111111
+0137+  FD44             
+0766   FD44             
+0767   FD44 00 00       	.word	0
+0768   FD45             
+0769   FD45             	.end
+0770   FD45             
+0771   FD45             ;******************************************************************
+0772   FD45             
+0773   FD45             
+tasm: Number of errors = 0
